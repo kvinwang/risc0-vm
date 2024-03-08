@@ -61,7 +61,6 @@ where
 pub struct ExecutorEnv<'a> {
     pub(crate) env_vars: HashMap<String, String>,
     pub(crate) args: Vec<String>,
-    pub(crate) segment_limit_po2: Option<u32>,
     pub(crate) session_limit: Option<u64>,
     pub(crate) posix_io: Rc<RefCell<PosixIo<'a>>>,
     pub(crate) slice_io: Rc<RefCell<SliceIoTable<'a>>>,
@@ -109,15 +108,6 @@ impl<'a> ExecutorEnvBuilder<'a> {
         }
 
         Ok(inner)
-    }
-
-    /// Set a segment limit, specified in powers of 2 cycles.
-    ///
-    /// Given value must be between [risc0_zkp::MIN_CYCLES_PO2] and
-    /// [risc0_zkp::MAX_CYCLES_PO2] (inclusive).
-    pub fn segment_limit_po2(&mut self, limit: u32) -> &mut Self {
-        self.inner.segment_limit_po2 = Some(limit);
-        self
     }
 
     /// Set a session limit, specified in number of cycles.

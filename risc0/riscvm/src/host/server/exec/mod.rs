@@ -21,5 +21,3 @@
 pub(crate) mod executor;
 mod monitor;
 pub(crate) mod syscall;
-#[cfg(test)]
-mod tests;

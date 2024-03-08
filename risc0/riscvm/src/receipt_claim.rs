@@ -50,9 +50,8 @@ pub struct ReceiptClaim {
     ///
     /// NOTE: In order to avoid extra logic in the rv32im circuit to perform arithmetic on the PC
     /// with carry, the post state PC is recorded as the current PC + 4. Subtract 4 to get the
-    /// "actual" final PC of the zkVM at the end of the segment. When the exit code is `Halted` or
-    /// `Paused`, this will be the address of the halt `ecall`. When the exit code is
-    /// `SystemSplit`, this will be the address of the next instruction to be executed.
+    /// "actual" final PC of the zkVM at the end of the segment. When the exit code is `Halted`,
+    /// this will be the address of the halt `ecall`.
     pub post: MaybePruned<SystemState>,
 
     /// The exit code for the execution.
@@ -170,22 +169,6 @@ pub enum ExitCode {
     /// guest program. A halted program cannot be resumed.
     Halted(u32),
 
-    /// This indicates the execution ended in a paused state with an interior exit code set by the
-    /// guest program. A paused program can be resumed such that execution picks up where it left
-    /// of, with the same memory state.
-    Paused(u32),
-
-    /// This indicates the execution ended on a host-initiated system split.
-    ///
-    /// System split is mechanism by which the host can temporarily stop execution of the guest.
-    /// Execution ended in a system split has no output and no conclusions can be drawn about
-    /// whether the program will eventually halt. System split is used in [continuations] to split
-    /// execution into individually provable [segments].
-    ///
-    /// [continuations]: https://dev.risczero.com/terminology#continuations
-    /// [segments]: https://dev.risczero.com/terminology#segment
-    SystemSplit,
-
     /// This indicates that the guest exited upon reaching the session limit set by the host.
     ///
     /// NOTE: The current version of the RISC Zero zkVM will never exit with an exit code of SessionLimit.
@@ -197,8 +180,6 @@ impl ExitCode {
     pub(crate) fn into_pair(self) -> (u32, u32) {
         match self {
             ExitCode::Halted(user_exit) => (0, user_exit),
-            ExitCode::Paused(user_exit) => (1, user_exit),
-            ExitCode::SystemSplit => (2, 0),
             ExitCode::SessionLimit => (2, 2),
         }
     }
@@ -209,8 +190,6 @@ impl ExitCode {
     ) -> Result<ExitCode, InvalidExitCodeError> {
         match sys_exit {
             0 => Ok(ExitCode::Halted(user_exit)),
-            1 => Ok(ExitCode::Paused(user_exit)),
-            2 => Ok(ExitCode::SystemSplit),
             _ => Err(InvalidExitCodeError(sys_exit, user_exit)),
         }
     }
@@ -218,8 +197,8 @@ impl ExitCode {
     #[cfg(not(target_os = "zkvm"))]
     pub(crate) fn expects_output(&self) -> bool {
         match self {
-            ExitCode::Halted(_) | ExitCode::Paused(_) => true,
-            ExitCode::SystemSplit | ExitCode::SessionLimit => false,
+            ExitCode::Halted(_) => true,
+            ExitCode::SessionLimit => false,
         }
     }
 }

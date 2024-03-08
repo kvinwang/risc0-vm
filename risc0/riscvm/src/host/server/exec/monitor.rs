@@ -14,6 +14,7 @@
 
 use std::{array, collections::BTreeSet, mem::take};
 
+use alloc::collections::BTreeMap;
 use anyhow::{bail, Result};
 use risc0_binfmt::MemoryImage;
 use risc0_zkp::core::hash::sha::BLOCK_BYTES;
@@ -71,35 +72,32 @@ pub struct MemoryMonitor {
     pub faults: PageFaults,
     session_cycle: usize,
     pub trace_events: BTreeSet<TraceEvent>,
-    resident: Vec<bool>,
-    dirty: Vec<bool>,
+    resident: BTreeSet<u32>,
+    dirty: BTreeSet<u32>,
     pending_actions: Vec<Action>,
     pub page_read_cycles: usize,
     pub page_write_cycles: usize,
     enable_trace: bool,
-    pages: Vec<Option<Page>>,
+    pages: BTreeMap<u32, Page>,
     registers: [u32; REG_MAX],
 }
 
 impl MemoryMonitor {
     pub fn new(image: MemoryImage, enable_trace: bool) -> Self {
         let num_pages = image.info.num_pages as usize + 1;
-        let resident = vec![false; num_pages];
-        let dirty = vec![false; num_pages];
-        let pages = vec![None; num_pages];
         Self {
             image,
             num_pages,
             faults: PageFaults::default(),
             session_cycle: 0,
             trace_events: BTreeSet::new(),
-            resident,
-            dirty,
+            resident: BTreeSet::new(),
+            dirty: BTreeSet::new(),
             pending_actions: Vec::new(),
             page_read_cycles: 0,
             page_write_cycles: 0,
             enable_trace,
-            pages,
+            pages: BTreeMap::new(),
             registers: [0; REG_MAX],
         }
     }
@@ -170,7 +168,7 @@ impl MemoryMonitor {
     fn load_page(&mut self, addr: u32) -> Result<()> {
         let info = &self.image.info;
         let page_idx = self.get_page_index(addr)?;
-        if self.resident[page_idx as usize] {
+        if self.resident.contains(&page_idx) {
             return Ok(());
         }
 
@@ -184,7 +182,7 @@ impl MemoryMonitor {
             cycles_per_page(BLOCKS_PER_PAGE)
         };
 
-        self.resident[page_idx as usize] = true;
+        self.resident.insert(page_idx);
         self.pending_actions
             .push(Action::PageRead(page_idx, page_cycles));
         self.page_read_cycles += page_cycles;
@@ -195,7 +193,7 @@ impl MemoryMonitor {
     fn mark_page(&mut self, addr: u32) {
         let info = &self.image.info;
         let page_idx = info.get_page_index(addr);
-        if self.dirty[page_idx as usize] {
+        if self.dirty.contains(&page_idx) {
             return;
         }
 
@@ -209,7 +207,7 @@ impl MemoryMonitor {
             cycles_per_page(BLOCKS_PER_PAGE)
         };
 
-        self.dirty[page_idx as usize] = true;
+        self.dirty.insert(page_idx);
         self.pending_actions
             .push(Action::PageWrite(page_idx, page_cycles));
         self.page_write_cycles += page_cycles;
@@ -261,8 +259,9 @@ impl MemoryMonitor {
         let info = &self.image.info;
         let page_idx = self.get_page_index(addr)?;
         let offset = addr % info.page_size;
-        self.pages[page_idx as usize]
-            .get_or_insert_with(|| Page {
+        self.pages
+            .entry(page_idx)
+            .or_insert_with(|| Page {
                 buf: self.image.load_page(page_idx),
             })
             .load_bytes(offset, bytes);
@@ -391,8 +390,9 @@ impl MemoryMonitor {
         let info = &self.image.info;
         let page_idx = self.get_page_index(addr)?;
         let offset = addr % info.page_size;
-        self.pages[page_idx as usize]
-            .get_or_insert_with(|| Page {
+        self.pages
+            .entry(page_idx)
+            .or_insert_with(|| Page {
                 buf: self.image.load_page(page_idx),
             })
             .store_bytes(offset, bytes);
@@ -405,13 +405,13 @@ impl MemoryMonitor {
             match action {
                 Action::PageRead(page_idx, cycles) => {
                     tracing::debug!("undo: PageRead(0x{page_idx:08x}, {cycles})");
-                    self.resident[*page_idx as usize] = false;
+                    self.resident.remove(page_idx);
                     self.faults.reads.remove(page_idx);
                     self.page_read_cycles -= cycles;
                 }
                 Action::PageWrite(page_idx, cycles) => {
                     tracing::debug!("undo: PageWrite(0x{page_idx:08x}, {cycles})");
-                    self.dirty[*page_idx as usize] = false;
+                    self.dirty.remove(page_idx);
                     self.faults.writes.remove(page_idx);
                     self.page_write_cycles -= cycles;
                 }
@@ -446,9 +446,9 @@ impl MemoryMonitor {
     }
 
     pub fn clear_segment(&mut self) -> Result<()> {
-        self.resident.fill(false);
-        self.dirty.fill(false);
-        self.pages.fill(None);
+        self.resident.clear();
+        self.dirty.clear();
+        self.pages.clear();
         self.page_read_cycles = 0;
         self.page_write_cycles = 0;
         self.faults.clear();
@@ -459,35 +459,6 @@ impl MemoryMonitor {
         self.clear_segment()?;
         self.session_cycle = 0;
         Ok(())
-    }
-
-    pub fn build_image(&mut self, pc: u32) -> Result<MemoryImage> {
-        // self.faults.dump();
-
-        // Write all dirty pages back to the memory image.
-        for page_idx in self.faults.writes.iter() {
-            if let Some(page) = self.pages[*page_idx as usize].as_ref() {
-                tracing::debug!("flush page: 0x{page_idx:08x}");
-                let info = &self.image.info;
-                let addr = info.get_page_addr(*page_idx);
-                self.image.store_region_in_page(addr, &page.buf);
-            }
-        }
-
-        // Write the system register file to the system page.
-        let mut bytes = [0_u8; WORD_SIZE * REG_MAX];
-        for idx in 0..REG_MAX {
-            bytes[idx * WORD_SIZE..(idx + 1) * WORD_SIZE]
-                .copy_from_slice(&self.registers[idx].to_le_bytes());
-        }
-        let sys_addr = SYSTEM.start() as u32;
-        self.image.store_region_in_page(sys_addr, &bytes);
-
-        // Update the merkle tree and PC.
-        self.image
-            .hash_pages_iter(self.faults.writes.iter().cloned())?;
-        self.image.pc = pc;
-        Ok(self.image.clone())
     }
 }
 

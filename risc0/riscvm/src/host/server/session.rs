@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result};
 use risc0_binfmt::{MemoryImage, SystemState};
 use risc0_zkvm_platform::WORD_SIZE;
 use serde::{Deserialize, Serialize};
@@ -48,17 +48,11 @@ pub struct Session {
     /// The [ExitCode] of the session.
     pub exit_code: ExitCode,
 
-    /// The final [MemoryImage] at the end of execution.
-    pub post_image: MemoryImage,
-
     /// The hooks to be called during the proving phase.
     pub hooks: Vec<Box<dyn SessionEvents>>,
 
     /// The system state of the initial [MemoryImage].
     pub pre_state: SystemState,
-
-    /// The system state of the final [MemoryImage] at the end of execution.
-    pub post_state: SystemState,
 }
 
 /// A reference to a [Segment].
@@ -115,60 +109,18 @@ pub trait SessionEvents {
 
 impl Session {
     /// Construct a new [Session] from its constituent components.
-    pub fn new(
-        journal: Option<Vec<u8>>,
-        exit_code: ExitCode,
-        post_image: MemoryImage,
-        pre_state: SystemState,
-        post_state: SystemState,
-    ) -> Self {
+    pub fn new(journal: Option<Vec<u8>>, exit_code: ExitCode, pre_state: SystemState) -> Self {
         Self {
             journal: journal.map(|x| Journal::new(x)),
             exit_code,
-            post_image,
             hooks: Vec::new(),
             pre_state,
-            post_state,
         }
     }
 
     /// Add a hook to be called during the proving phase.
     pub fn add_hook<E: SessionEvents + 'static>(&mut self, hook: E) {
         self.hooks.push(Box::new(hook));
-    }
-
-    /// Calculate for the [ReceiptClaim] associated with this [Session]. The
-    /// [ReceiptClaim] is the claim that will be proven if this [Session]
-    /// is passed to the [crate::Prover].
-    pub fn get_claim(&self) -> Result<ReceiptClaim> {
-        // Construct the Output struct for the session, checking internal consistency.
-        // NOTE: The Session output if distinct from the final Segment output because in the
-        // Session output any proven assumptions are not included.
-        let output = if self.exit_code.expects_output() {
-            self.journal
-                .as_ref()
-                .map(|journal| -> Result<_> {
-                    Ok(Output {
-                        journal: journal.bytes.clone().into(),
-                    })
-                })
-                .transpose()?
-        } else {
-            ensure!(
-                self.journal.is_none(),
-                "Session with exit code {:?} has a journal",
-                self.exit_code
-            );
-            None
-        };
-
-        Ok(ReceiptClaim {
-            pre: self.pre_state.clone().into(),
-            post: self.post_state.clone().into(),
-            exit_code: self.exit_code,
-            input: Digest::ZERO,
-            output: output.into(),
-        })
     }
 
     /// Log cycle information for this [Session].

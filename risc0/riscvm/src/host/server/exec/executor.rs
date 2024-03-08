@@ -25,7 +25,7 @@ use risc0_zkp::{
         digest::{DIGEST_BYTES, DIGEST_WORDS},
         hash::sha::{BLOCK_BYTES, BLOCK_WORDS},
     },
-    MAX_CYCLES_PO2, MIN_CYCLES_PO2, ZK_CYCLES,
+    ZK_CYCLES,
 };
 use risc0_zkvm_platform::{
     fileno,
@@ -57,10 +57,6 @@ const SHA_CYCLES: usize = 73;
 
 /// Number of cycles required to complete a BigInt operation.
 const BIGINT_CYCLES: usize = 9;
-
-/// The default segment limit specified in powers of 2 cycles. Choose this value
-/// to try and fit with 8GB of RAM.
-const DEFAULT_SEGMENT_LIMIT_PO2: u32 = 20; // 1M cycles
 
 // Capture the journal output in a buffer that we can access afterwards.
 #[derive(Clone, Default)]
@@ -107,12 +103,12 @@ pub struct SyscallRecord {
 pub struct ExecutorImpl<'a> {
     env: ExecutorEnv<'a>,
     pub(crate) syscall_table: SyscallTable<'a>,
-    pre_image: Option<Box<MemoryImage>>,
+    pre_system_state: SystemState,
     monitor: MemoryMonitor,
     pc: u32,
     init_cycles: usize,
     body_cycles: usize,
-    segment_limit: usize,
+    // segment_limit: usize,
     segment_cycle: usize,
     insn_counter: u32,
     split_insn: Option<u32>,
@@ -136,28 +132,21 @@ impl<'a> ExecutorImpl<'a> {
     }
 
     fn with_details(env: ExecutorEnv<'a>, image: MemoryImage) -> Result<Self> {
-        // Enforce segment_limit_po2 bounds
-        let segment_limit_po2 = env.segment_limit_po2.unwrap_or(DEFAULT_SEGMENT_LIMIT_PO2) as usize;
-        if segment_limit_po2 < MIN_CYCLES_PO2 || segment_limit_po2 > MAX_CYCLES_PO2 {
-            bail!("Invalid segment_limit_po2: {}", segment_limit_po2);
-        }
-
         let pc = image.pc;
-        let monitor = MemoryMonitor::new(image.clone(), !env.trace.is_empty());
+        let pre_system_state = image.get_system_state()?;
+        let monitor = MemoryMonitor::new(image, !env.trace.is_empty());
         let init_cycles = 0;
         let fini_cycles = 0;
         let const_cycles = init_cycles + fini_cycles + SHA_CYCLES + ZK_CYCLES;
         let syscall_table = SyscallTable::new(&env);
-
         Ok(Self {
             env,
             syscall_table,
-            pre_image: Some(Box::new(image)),
+            pre_system_state,
             monitor,
             pc,
             init_cycles,
             body_cycles: 0,
-            segment_limit: 1 << segment_limit_po2,
             segment_cycle: init_cycles,
             insn_counter: 0,
             split_insn: None,
@@ -188,14 +177,14 @@ impl<'a> ExecutorImpl<'a> {
     pub fn from_elf(env: ExecutorEnv<'a>, elf: &[u8]) -> Result<Self> {
         let program = Program::load_elf(elf, GUEST_MAX_MEM as u32)?;
         let image = MemoryImage::new(&program, PAGE_SIZE as u32)?;
-
+        drop(program);
         Self::with_details(env, image)
     }
 
     /// This will run the executor to get a [Session] which contain the results
     /// of the execution.
     pub fn run(&mut self) -> Result<Session> {
-        let (Some(ExitCode::SystemSplit | ExitCode::Paused(_)) | None) = self.exit_code else {
+        if self.exit_code.is_some() {
             bail!(
                 "cannot resume an execution which exited with {:?}",
                 self.exit_code
@@ -204,10 +193,9 @@ impl<'a> ExecutorImpl<'a> {
 
         let start_time = std::time::Instant::now();
 
-        let pre_image = self.pre_image.as_ref().context("missing pre_image")?;
-        let pre_state = pre_image.get_system_state()?;
+        let pre_state = self.pre_system_state.clone();
 
-        self.pc = pre_image.pc;
+        self.pc = pre_state.pc;
         self.monitor.clear_session()?;
 
         let journal = Journal::default();
@@ -216,26 +204,15 @@ impl<'a> ExecutorImpl<'a> {
             .borrow_mut()
             .with_write_fd(fileno::JOURNAL, journal.clone());
 
-        let mut run_loop = || -> Result<(ExitCode, MemoryImage)> {
+        let mut run_loop = || -> Result<ExitCode> {
             loop {
                 if let Some(exit_code) = self.step()? {
                     let total_cycles = self.total_cycles();
                     tracing::debug!("exit_code: {exit_code:?}, total_cycles: {total_cycles}");
-                    assert!(total_cycles <= self.segment_limit);
-                    let post_image = self.monitor.build_image(self.pc)?;
                     match exit_code {
-                        ExitCode::SystemSplit => self.split(Some(post_image.into()))?,
-                        ExitCode::Paused(inner) => {
-                            tracing::debug!("Paused({inner}): {}", self.segment_cycle);
-                            // Set the pre_image so that the Executor can be run again to resume.
-                            // Move the pc forward by WORD_SIZE because halt does not.
-                            let mut resume_pre_image = post_image.clone();
-                            resume_pre_image.pc += WORD_SIZE as u32;
-                            self.split(Some(resume_pre_image.into()))?;
-                        }
                         ExitCode::Halted(inner) => {
                             tracing::debug!("Halted({inner}): {}", self.segment_cycle);
-                            return Ok((exit_code, post_image));
+                            return Ok(exit_code);
                         }
                         ExitCode::SessionLimit => {
                             bail!("Session limit exceeded");
@@ -245,7 +222,7 @@ impl<'a> ExecutorImpl<'a> {
             }
         };
 
-        let (exit_code, post_image) = run_loop()?;
+        let exit_code = run_loop()?;
         let elapsed = start_time.elapsed();
 
         // Set the session_journal to the committed data iff the the guest set a non-zero output.
@@ -273,28 +250,7 @@ impl<'a> ExecutorImpl<'a> {
             .flatten()
             .transpose()?;
 
-        // NOTE: When a segment ends in a Halted(_) state, it may not update the post state
-        // digest. As a result, it will be the same are the pre_image. All other exit codes require
-        // the post state digest to reflect the final memory state.
-        // NOTE: The PC on the the post state is stored "+ 4". See ReceiptClaim for more detail.
-        let post_state = SystemState {
-            pc: post_image
-                .pc
-                .checked_add(WORD_SIZE as u32)
-                .context("invalid pc in session post image")?,
-            merkle_root: match exit_code {
-                ExitCode::Halted(_) => self.pre_image.as_ref().expect("").compute_root_hash()?,
-                _ => post_image.compute_root_hash()?,
-            },
-        };
-
-        let session = Session::new(
-            session_journal,
-            exit_code,
-            post_image,
-            pre_state,
-            post_state,
-        );
+        let session = Session::new(session_journal, exit_code, pre_state);
 
         tracing::info_span!("executor").in_scope(|| {
             tracing::info!("execution time: {}", elapsed.human_duration());
@@ -302,15 +258,6 @@ impl<'a> ExecutorImpl<'a> {
         });
 
         Ok(session)
-    }
-
-    fn split(&mut self, pre_image: Option<Box<MemoryImage>>) -> Result<()> {
-        self.pre_image = pre_image;
-        self.body_cycles = 0;
-        self.split_insn = None;
-        self.insn_counter = 0;
-        self.segment_cycle = self.init_cycles;
-        self.monitor.clear_segment()
     }
 
     /// Execute a single instruction.
@@ -367,34 +314,7 @@ impl<'a> ExecutorImpl<'a> {
             OpCodeResult::new(hart.pc, None, 0)
         };
 
-        // try to execute the next instruction
-        // if the segment limit is exceeded:
-        // * don't increment the PC
-        // * don't record any activity
-        // * return ExitCode::SystemSplit
-        // otherwise, commit memory and hart
-        let total_pending_cycles = self.total_cycles() + opcode.cycles + op_result.extra_cycles;
-        // tracing::debug!(
-        //     "cycle: {}, segment: {}, total: {}",
-        //     self.segment_cycle,
-        //     total_pending_cycles,
-        //     self.total_cycles()
-        // );
-
-        let exit_code = if total_pending_cycles > self.segment_limit {
-            if self.insn_counter == 0 {
-                // splitting on the first instruction of the segment means that
-                // it's too large to fit into a signle cycle.
-                bail!("execution of instruction at pc [0x{:08x}] resulted in a cycle count too large to fit into a single segment.", self.pc);
-            }
-            self.split_insn = Some(self.insn_counter);
-            tracing::debug!("split: [{}] pc: 0x{:08x}", self.segment_cycle, self.pc,);
-            self.monitor.undo()?;
-            Some(ExitCode::SystemSplit)
-        } else {
-            self.advance(opcode, op_result)
-        };
-        Ok(exit_code)
+        Ok(self.advance(opcode, op_result))
     }
 
     fn advance(&mut self, opcode: OpCode, op_result: OpCodeResult) -> Option<ExitCode> {
@@ -462,11 +382,7 @@ impl<'a> ExecutorImpl<'a> {
                 Some(ExitCode::Halted(user_exit)),
                 0,
             )),
-            halt::PAUSE => Ok(OpCodeResult::new(
-                self.pc,
-                Some(ExitCode::Paused(user_exit)),
-                0,
-            )),
+            halt::PAUSE => Ok(OpCodeResult::new(self.pc + WORD_SIZE, None, 0)),
             _ => bail!("Illegal halt type: {halt_type}"),
         }
     }
