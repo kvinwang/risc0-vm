@@ -80,10 +80,11 @@ use risc0_binfmt::SystemState;
 
 use self::host::server::session::Session;
 
-use receipt_claim::{ExitCode, ReceiptClaim};
+use receipt_claim::ReceiptClaim;
 
 pub use host::client::env::{ExecutorEnv, ExecutorEnvBuilder};
 pub use host::server::exec::executor::ExecutorImpl;
+pub use receipt_claim::ExitCode;
 
 /// Align the given address `addr` upwards to alignment `align`.
 ///
