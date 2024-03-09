@@ -382,7 +382,7 @@ impl<'a> ExecutorImpl<'a> {
                 Some(ExitCode::Halted(user_exit)),
                 0,
             )),
-            halt::PAUSE => Ok(OpCodeResult::new(self.pc + WORD_SIZE, None, 0)),
+            halt::PAUSE => Ok(OpCodeResult::new(self.pc + WORD_SIZE as u32, None, 0)),
             _ => bail!("Illegal halt type: {halt_type}"),
         }
     }
