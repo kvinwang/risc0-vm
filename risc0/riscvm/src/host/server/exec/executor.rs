@@ -104,6 +104,7 @@ pub struct ExecutorImpl<'a> {
     env: ExecutorEnv<'a>,
     pub(crate) syscall_table: SyscallTable<'a>,
     pre_system_state: SystemState,
+    compute_id: Digest,
     monitor: MemoryMonitor,
     pc: u32,
     init_cycles: usize,
@@ -131,9 +132,15 @@ impl<'a> ExecutorImpl<'a> {
         Self::with_details(env, image)
     }
 
+    /// Returns the compute_id of the guest program.
+    pub fn compute_id(&self) -> Digest {
+        self.compute_id
+    }
+
     fn with_details(env: ExecutorEnv<'a>, image: MemoryImage) -> Result<Self> {
         let pc = image.pc;
         let pre_system_state = image.get_system_state()?;
+        let compute_id = image.compute_id()?;
         let monitor = MemoryMonitor::new(image, !env.trace.is_empty());
         let init_cycles = 0;
         let fini_cycles = 0;
@@ -143,6 +150,7 @@ impl<'a> ExecutorImpl<'a> {
             env,
             syscall_table,
             pre_system_state,
+            compute_id,
             monitor,
             pc,
             init_cycles,
