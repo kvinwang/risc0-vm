@@ -18,7 +18,6 @@ use std::{cell::RefCell, fmt::Debug, io::Write, rc::Rc};
 
 use anyhow::{bail, Context, Result};
 use crypto_bigint::{CheckedMul, Encoding, NonZero, U256, U512};
-use human_repr::HumanDuration;
 use risc0_binfmt::{MemoryImage, Program, SystemState};
 use risc0_zkp::{
     core::{
@@ -199,8 +198,6 @@ impl<'a> ExecutorImpl<'a> {
             );
         };
 
-        let start_time = std::time::Instant::now();
-
         let pre_state = self.pre_system_state.clone();
 
         self.pc = pre_state.pc;
@@ -229,10 +226,7 @@ impl<'a> ExecutorImpl<'a> {
                 };
             }
         };
-
         let exit_code = run_loop()?;
-        let elapsed = start_time.elapsed();
-
         // Set the session_journal to the committed data iff the the guest set a non-zero output.
         let session_journal = self
             .output_digest
@@ -257,15 +251,7 @@ impl<'a> ExecutorImpl<'a> {
             })
             .flatten()
             .transpose()?;
-
-        let session = Session::new(session_journal, exit_code, pre_state);
-
-        tracing::info_span!("executor").in_scope(|| {
-            tracing::info!("execution time: {}", elapsed.human_duration());
-            session.log();
-        });
-
-        Ok(session)
+        Ok(Session::new(session_journal, exit_code, pre_state))
     }
 
     /// Execute a single instruction.
