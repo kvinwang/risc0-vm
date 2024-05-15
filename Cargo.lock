@@ -6014,6 +6014,32 @@ name = "risc0-zkvm-receipts"
 version = "0.22.0-alpha.1"
 
 [[package]]
+name = "riscvm"
+version = "0.22.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "bytemuck",
+ "bytes",
+ "crypto-bigint",
+ "elf",
+ "getrandom 0.2.12",
+ "hex",
+ "human-repr",
+ "num-derive",
+ "num-traits",
+ "risc0-binfmt",
+ "risc0-core",
+ "risc0-zkp",
+ "risc0-zkvm-platform",
+ "rrs-lib",
+ "serde",
+ "sha2 0.10.8",
+ "tracing",
+ "typetag",
+]
+
+[[package]]
 name = "rlp"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
